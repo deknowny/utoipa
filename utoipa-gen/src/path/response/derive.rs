@@ -252,6 +252,89 @@ impl ToTokensDiagnostics for IntoResponses {
             None
         };
 
+        // --- begin helpers for axum_extras codegen ---
+        fn has_utoipa_to_axum(attrs: &[Attribute]) -> Result<bool, Diagnostics> {
+            for attr in attrs {
+                if attr.path().is_ident("utoipa") {
+                    let args = attr
+                        .parse_args_with(|input: ParseStream| {
+                            Punctuated::<Meta, Comma>::parse_terminated(input)
+                        })
+                        .map_err(Diagnostics::from)?;
+                    for meta in args {
+                        if let Meta::Path(path) = &meta {
+                            if path.is_ident("to_axum") {
+                                return Ok(true);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(false)
+        }
+
+        fn response_has_flatten(attrs: &[Attribute]) -> Result<bool, Diagnostics> {
+            for attr in attrs {
+                if attr.path().is_ident("response") {
+                    let args = attr
+                        .parse_args_with(|input: ParseStream| {
+                            Punctuated::<Meta, Comma>::parse_terminated(input)
+                        })
+                        .map_err(Diagnostics::from)?;
+                    for meta in args {
+                        if let Meta::Path(path) = &meta {
+                            if path.is_ident("flatten") {
+                                return Ok(true);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(false)
+        }
+
+        fn response_status_u16(attrs: &[Attribute]) -> Result<Option<u16>, Diagnostics> {
+            for attr in attrs {
+                if attr.path().is_ident("response") {
+                    let args = attr
+                        .parse_args_with(|input: ParseStream| {
+                            Punctuated::<Meta, Comma>::parse_terminated(input)
+                        })
+                        .map_err(Diagnostics::from)?;
+                    for meta in args {
+                        if let Meta::NameValue(nv) = &meta {
+                            if nv.path.is_ident("status") {
+                                // Support status = 200 / 403 / ...
+                                if let syn::Expr::Lit(expr_lit) = &nv.value {
+                                    if let syn::Lit::Int(li) = &expr_lit.lit {
+                                        let v = li.base10_parse::<u16>().map_err(Diagnostics::from)?;
+                                        return Ok(Some(v));
+                                    }
+                                    if let syn::Lit::Str(ls) = &expr_lit.lit {
+                                        let v = ls
+                                            .value()
+                                            .parse::<u16>()
+                                            .map_err(|e| Diagnostics::from(syn::Error::new(ls.span(), e.to_string())))?;
+                                        return Ok(Some(v));
+                                    }
+                                }
+                                // Also support status = "200" via expr
+                                if let syn::Expr::Path(_) = &nv.value {
+                                    // unsupported (non-literal)
+                                    return Ok(None);
+                                }
+                                return Ok(None);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(None)
+        }
+        // --- end helpers for axum_extras codegen ---
+
+        let to_axum = has_utoipa_to_axum(&self.attributes)?;
+
         if flatten_extends.is_empty() {
             tokens.extend(quote! {
                 impl #impl_generics utoipa::IntoResponses for #ident #ty_generics #where_clause {
@@ -363,6 +446,120 @@ impl ToTokensDiagnostics for IntoResponses {
                     }
                 }
             });
+        }
+
+        // --- axum_extras IntoResponse codegen ---
+        if to_axum {
+            let axum_impl = match &self.data {
+                Data::Struct(struct_value) => {
+                    // Requires a literal status on the container #[response(status = ...)]
+                    let Some(status) = response_status_u16(&self.attributes)? else {
+                        return Err(Diagnostics::with_span(
+                            self.ident.span(),
+                            "`#[utoipa(to_axum)]` requires a literal `#[response(status = ...)]` on the type",
+                        ));
+                    };
+
+                    // Determine how to serialize body for struct: Json(self)
+                    let status_u16 = status;
+                    quote! {
+                        #[cfg(feature = "axum_extras")]
+                        impl #impl_generics axum::response::IntoResponse for #ident #ty_generics #where_clause
+                        where
+                            #ident #ty_generics: serde::Serialize,
+                        {
+                            fn into_response(self) -> axum::response::Response {
+                                let status = axum::http::StatusCode::from_u16(#status_u16)
+                                    .expect("valid status code");
+                                (status, axum::Json(self)).into_response()
+                            }
+                        }
+                    }
+                }
+                Data::Enum(enum_value) => {
+                    // Build match arms. Flatten arms delegate to inner IntoResponse.
+                    let mut arms: Vec<TokenStream> = Vec::new();
+
+                    for variant in enum_value.variants.iter() {
+                        let is_flatten = response_has_flatten(&variant.attrs)?;
+
+                        if is_flatten {
+                            // Only unnamed with exactly one field.
+                            match &variant.fields {
+                                Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+                                    let v_ident = &variant.ident;
+                                    arms.push(quote! {
+                                        Self::#v_ident(inner) => axum::response::IntoResponse::into_response(inner)
+                                    });
+                                }
+                                _ => {
+                                    return Err(Diagnostics::with_span(
+                                        variant.span(),
+                                        "`#[utoipa(to_axum)]` with `#[response(flatten)]` requires an unnamed enum variant with exactly one field",
+                                    ));
+                                }
+                            }
+                            continue;
+                        }
+
+                        // Non-flatten variants must have literal status.
+                        let Some(status) = response_status_u16(&variant.attrs)? else {
+                            return Err(Diagnostics::with_span(
+                                variant.span(),
+                                "`#[utoipa(to_axum)]` requires a literal `#[response(status = ...)]` on each non-flatten variant",
+                            ));
+                        };
+                        let status_u16 = status;
+                        let v_ident = &variant.ident;
+
+                        match &variant.fields {
+                            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+                                arms.push(quote! {
+                                    Self::#v_ident(inner) => {
+                                        let status = axum::http::StatusCode::from_u16(#status_u16)
+                                            .expect("valid status code");
+                                        (status, axum::Json(inner)).into_response()
+                                    }
+                                });
+                            }
+                            Fields::Unit => {
+                                arms.push(quote! {
+                                    Self::#v_ident => {
+                                        let status = axum::http::StatusCode::from_u16(#status_u16)
+                                            .expect("valid status code");
+                                        (status, axum::Json(())).into_response()
+                                    }
+                                });
+                            }
+                            _ => {
+                                return Err(Diagnostics::with_span(
+                                    variant.span(),
+                                    "`#[utoipa(to_axum)]` currently supports only unit variants or unnamed variants with exactly one field",
+                                ));
+                            }
+                        }
+                    }
+
+                    quote! {
+                        #[cfg(feature = "axum_extras")]
+                        impl #impl_generics axum::response::IntoResponse for #ident #ty_generics #where_clause
+                        where
+                            #ident #ty_generics: serde::Serialize,
+                        {
+                            fn into_response(self) -> axum::response::Response {
+                                match self {
+                                    #(#arms,)*
+                                }
+                            }
+                        }
+                    }
+                }
+                Data::Union(_) => {
+                    quote! {}
+                }
+            };
+
+            tokens.extend(axum_impl);
         }
 
         Ok(())

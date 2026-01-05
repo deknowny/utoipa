@@ -2821,7 +2821,7 @@ pub fn to_response(input: TokenStream) -> TokenStream {
 
 #[proc_macro_derive(
     IntoResponses,
-    attributes(response, to_schema, ref_response, to_response)
+    attributes(utoipa, response, to_schema, ref_response, to_response)
 )]
 /// Generate responses with status codes what
 /// can be attached to the [`utoipa::path`][path_into_responses].
