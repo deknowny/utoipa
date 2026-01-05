@@ -9,7 +9,7 @@ use syn::spanned::Spanned;
 use syn::token::Comma;
 use syn::{
     Attribute, Data, Field, Fields, Generics, Lifetime, LifetimeParam, LitStr, Path, Type,
-    TypePath, Variant,
+    TypePath, Variant, Meta,
 };
 
 use crate::component::schema::{EnumSchema, NamedStructSchema, Root};
@@ -116,69 +116,125 @@ pub struct IntoResponses {
 
 impl ToTokensDiagnostics for IntoResponses {
     fn to_tokens(&self, tokens: &mut TokenStream) -> Result<(), Diagnostics> {
-        let responses = match &self.data {
-            Data::Struct(struct_value) => match &struct_value.fields {
-                Fields::Named(fields) => {
-                    let response =
-                        NamedStructResponse::new(&self.attributes, &self.ident, &fields.named)?.0;
-                    let status = &response.status_code;
-                    let response_tokens = as_tokens_or_diagnostics!(&response);
-
-                    Array::from_iter(iter::once(quote!((#status, #response_tokens))))
-                }
-                Fields::Unnamed(fields) => {
-                    let field = fields
-                        .unnamed
-                        .iter()
-                        .next()
-                        .expect("Unnamed struct must have 1 field");
-
-                    let response =
-                        UnnamedStructResponse::new(&self.attributes, &field.ty, &field.attrs)?.0;
-                    let status = &response.status_code;
-                    let response_tokens = as_tokens_or_diagnostics!(&response);
-
-                    Array::from_iter(iter::once(quote!((#status, #response_tokens))))
-                }
-                Fields::Unit => {
-                    let response = UnitStructResponse::new(&self.attributes)?.0;
-                    let status = &response.status_code;
-                    let response_tokens = as_tokens_or_diagnostics!(&response);
-
-                    Array::from_iter(iter::once(quote!((#status, #response_tokens))))
-                }
-            },
-            Data::Enum(enum_value) => enum_value
-                .variants
-                .iter()
-                .map(|variant| match &variant.fields {
-                    Fields::Named(fields) => Ok(NamedStructResponse::new(
-                        &variant.attrs,
-                        &variant.ident,
-                        &fields.named,
-                    )?
-                    .0),
+        // Collect response tuples and optional flatten extensions.
+        let (responses, flatten_extends): (Array<TokenStream>, Vec<TokenStream>) = match &self.data {
+            Data::Struct(struct_value) => {
+                let responses = match &struct_value.fields {
+                    Fields::Named(fields) => {
+                        let response =
+                            NamedStructResponse::new(&self.attributes, &self.ident, &fields.named)?.0;
+                        let status = &response.status_code;
+                        let response_tokens = as_tokens_or_diagnostics!(&response);
+                        Array::from_iter(iter::once(quote!((#status, #response_tokens))))
+                    }
                     Fields::Unnamed(fields) => {
                         let field = fields
                             .unnamed
                             .iter()
                             .next()
-                            .expect("Unnamed enum variant must have 1 field");
-                        match UnnamedStructResponse::new(&variant.attrs, &field.ty, &field.attrs) {
-                            Ok(response) => Ok(response.0),
-                            Err(diagnostics) => Err(diagnostics),
+                            .expect("Unnamed struct must have 1 field");
+                        let response =
+                            UnnamedStructResponse::new(&self.attributes, &field.ty, &field.attrs)?.0;
+                        let status = &response.status_code;
+                        let response_tokens = as_tokens_or_diagnostics!(&response);
+                        Array::from_iter(iter::once(quote!((#status, #response_tokens))))
+                    }
+                    Fields::Unit => {
+                        let response = UnitStructResponse::new(&self.attributes)?.0;
+                        let status = &response.status_code;
+                        let response_tokens = as_tokens_or_diagnostics!(&response);
+                        Array::from_iter(iter::once(quote!((#status, #response_tokens))))
+                    }
+                };
+
+                (responses, Vec::new())
+            }
+            Data::Enum(enum_value) => {
+                // Helper function to check #[response(flatten)] on variant
+                fn variant_has_flatten(attrs: &[Attribute]) -> Result<bool, Diagnostics> {
+                    for attr in attrs {
+                        if attr.path().is_ident("response") {
+                            let args = attr
+                                .parse_args_with(|input: ParseStream| {
+                                    Punctuated::<Meta, Comma>::parse_terminated(input)
+                                })
+                                .map_err(Diagnostics::from)?;
+                            for meta in args {
+                                if let Meta::Path(path) = &meta {
+                                    if path.is_ident("flatten") {
+                                        return Ok(true);
+                                    }
+                                }
+                            }
                         }
                     }
-                    Fields::Unit => Ok(UnitStructResponse::new(&variant.attrs)?.0),
-                })
-                .collect::<Result<Vec<ResponseTuple>, Diagnostics>>()?
-                .iter()
-                .map(|response| {
-                    let status = &response.status_code;
-                    let response_tokens = as_tokens_or_diagnostics!(response);
-                    Ok(quote!((#status, utoipa::openapi::RefOr::from(#response_tokens))))
-                })
-                .collect::<Result<Array<TokenStream>, Diagnostics>>()?,
+                    Ok(false)
+                }
+
+                let mut normal_pairs: Vec<TokenStream> = Vec::new();
+                let mut flatten_extends: Vec<TokenStream> = Vec::new();
+
+                for variant in enum_value.variants.iter() {
+                    let is_flatten = variant_has_flatten(&variant.attrs)?;
+
+                    if is_flatten {
+                        // Only allow unnamed variant with exactly one field.
+                        match &variant.fields {
+                            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+                                let ty = &fields.unnamed.first().unwrap().ty;
+                                flatten_extends.push(quote! {
+                                    __utoipa_merge_responses(&mut __map, <#ty as utoipa::IntoResponses>::responses());
+                                });
+                            }
+                            _ => {
+                                return Err(Diagnostics::with_span(
+                                    variant.span(),
+                                    "`#[response(flatten)]` is only supported on unnamed enum variants with exactly one field",
+                                ));
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Non-flatten variants: keep original behavior.
+                    match &variant.fields {
+                        Fields::Named(fields) => {
+                            let response = NamedStructResponse::new(
+                                &variant.attrs,
+                                &variant.ident,
+                                &fields.named,
+                            )?
+                            .0;
+                            let status = &response.status_code;
+                            let response_tokens = as_tokens_or_diagnostics!(&response);
+                            normal_pairs
+                                .push(quote!((#status, utoipa::openapi::RefOr::from(#response_tokens))));
+                        }
+                        Fields::Unnamed(fields) => {
+                            let field = fields
+                                .unnamed
+                                .iter()
+                                .next()
+                                .expect("Unnamed enum variant must have 1 field");
+                            let response =
+                                UnnamedStructResponse::new(&variant.attrs, &field.ty, &field.attrs)?.0;
+                            let status = &response.status_code;
+                            let response_tokens = as_tokens_or_diagnostics!(&response);
+                            normal_pairs
+                                .push(quote!((#status, utoipa::openapi::RefOr::from(#response_tokens))));
+                        }
+                        Fields::Unit => {
+                            let response = UnitStructResponse::new(&variant.attrs)?.0;
+                            let status = &response.status_code;
+                            let response_tokens = as_tokens_or_diagnostics!(&response);
+                            normal_pairs
+                                .push(quote!((#status, utoipa::openapi::RefOr::from(#response_tokens))));
+                        }
+                    }
+                }
+
+                (Array::from_iter(normal_pairs), flatten_extends)
+            }
             Data::Union(_) => {
                 return Err(Diagnostics::with_span(
                     self.ident.span(),
@@ -190,21 +246,124 @@ impl ToTokensDiagnostics for IntoResponses {
         let ident = &self.ident;
         let (impl_generics, ty_generics, where_clause) = self.generics.split_for_impl();
 
-        let responses = if responses.len() > 0 {
+        let responses_from_iter = if responses.len() > 0 {
             Some(quote!( .responses_from_iter(#responses)))
         } else {
             None
         };
-        tokens.extend(quote!{
+
+        if flatten_extends.is_empty() {
+            tokens.extend(quote! {
                 impl #impl_generics utoipa::IntoResponses for #ident #ty_generics #where_clause {
                     fn responses() -> std::collections::BTreeMap<String, utoipa::openapi::RefOr<utoipa::openapi::response::Response>> {
                         utoipa::openapi::response::ResponsesBuilder::new()
-                            #responses
+                            #responses_from_iter
                             .build()
                             .into()
                     }
                 }
             });
+        } else {
+            tokens.extend(quote! {
+                impl #impl_generics utoipa::IntoResponses for #ident #ty_generics #where_clause {
+                    fn responses() -> std::collections::BTreeMap<String, utoipa::openapi::RefOr<utoipa::openapi::response::Response>> {
+                        fn __utoipa_merge_responses(
+                            dst: &mut std::collections::BTreeMap<
+                                String,
+                                utoipa::openapi::RefOr<utoipa::openapi::response::Response>,
+                            >,
+                            src: std::collections::BTreeMap<
+                                String,
+                                utoipa::openapi::RefOr<utoipa::openapi::response::Response>,
+                            >,
+                        ) {
+                            for (status, incoming) in src {
+                                match dst.get(&status).cloned() {
+                                    None => {
+                                        dst.insert(status, incoming);
+                                    }
+                                    Some(existing) => {
+                                        let merged = __utoipa_merge_response(existing, incoming);
+                                        dst.insert(status, merged);
+                                    }
+                                }
+                            }
+                        }
+
+                        fn __utoipa_merge_response(
+                            existing: utoipa::openapi::RefOr<utoipa::openapi::response::Response>,
+                            incoming: utoipa::openapi::RefOr<utoipa::openapi::response::Response>,
+                        ) -> utoipa::openapi::RefOr<utoipa::openapi::response::Response> {
+                            use utoipa::openapi::{RefOr, response::Response, schema::{Schema, OneOfBuilder}};
+
+                            // If they are literally equal, keep one.
+                            // NOTE: we must avoid using `incoming` after it has been moved.
+                            match (existing, incoming) {
+                                (ex, inc) if ex == inc => {
+                                    return ex;
+                                }
+                                // We only merge inline responses. If there is a $ref, prefer the incoming.
+                                (RefOr::T(mut ex), RefOr::T(inc)) => {
+                                    // continue below with `ex` and `inc`
+
+                                    // If content types don't overlap, prefer incoming (keeps behavior simple and deterministic).
+                                    let overlap = ex
+                                        .content
+                                        .keys()
+                                        .any(|k| inc.content.contains_key(k));
+                                    if !overlap {
+                                        return RefOr::T(inc);
+                                    }
+
+                                    // Merge overlapping content-types by producing oneOf schemas.
+                                    for (ct, inc_ct) in inc.content {
+                                        match ex.content.remove(&ct) {
+                                            None => {
+                                                ex.content.insert(ct, inc_ct);
+                                            }
+                                            Some(mut ex_ct) => {
+                                                let ex_schema = ex_ct.schema.take();
+                                                let inc_schema = inc_ct.schema.clone();
+
+                                                // If schemas are identical, keep one; otherwise wrap into oneOf.
+                                                let merged_schema = match (ex_schema, inc_schema) {
+                                                    (Some(a), Some(b)) if a == b => Some(a),
+                                                    (Some(a), Some(b)) => {
+                                                        Some(RefOr::T(Schema::OneOf(
+                                                            OneOfBuilder::new().item(a).item(b).build(),
+                                                        )))
+                                                    }
+                                                    (None, Some(b)) => Some(b),
+                                                    (Some(a), None) => Some(a),
+                                                    (None, None) => None,
+                                                };
+
+                                                ex_ct.schema = merged_schema;
+                                                ex.content.insert(ct, ex_ct);
+                                            }
+                                        }
+                                    }
+
+                                    return RefOr::T(ex);
+                                }
+                                // Fallback: if there is a $ref, prefer the incoming.
+                                (_, inc) => {
+                                    return inc;
+                                }
+                            }
+                        }
+
+                        let mut __map: std::collections::BTreeMap<String, utoipa::openapi::RefOr<utoipa::openapi::response::Response>> =
+                            utoipa::openapi::response::ResponsesBuilder::new()
+                                #responses_from_iter
+                                .build()
+                                .into();
+                        #(#flatten_extends)*
+                        __map
+                    }
+                }
+            });
+        }
 
         Ok(())
     }

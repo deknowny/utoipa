@@ -335,3 +335,51 @@ fn derive_into_responses_enum_with_multiple_responses() {
 
     assert_json_snapshot!(responses);
 }
+
+#[test]
+fn derive_into_responses_enum_with_flatten_responses() {
+    #[derive(utoipa::IntoResponses)]
+    #[allow(unused)]
+    enum AuthLayerError {
+        #[response(status = 403)]
+        BadToken(String),
+
+        #[response(status = 500)]
+        Internal(String),
+    }
+
+    let responses = into_responses! {
+        enum GetMeError {
+            #[response(status = 500)]
+            Internal(String),
+
+            #[response(flatten)]
+            Auth(AuthLayerError),
+        }
+    };
+
+    assert_json_snapshot!(responses);
+}
+
+#[test]
+fn derive_into_responses_enum_with_flatten_overrides_conflicting_status() {
+    #[derive(utoipa::IntoResponses)]
+    #[allow(unused)]
+    enum AuthLayerError {
+        #[response(status = 500)]
+        Internal(String),
+    }
+
+    let responses = into_responses! {
+        enum GetMeError {
+            // This will be overridden by the flattened `AuthLayerError` response for the same status.
+            #[response(status = 500)]
+            Internal(i32),
+
+            #[response(flatten)]
+            Auth(AuthLayerError),
+        }
+    };
+
+    assert_json_snapshot!(responses);
+}

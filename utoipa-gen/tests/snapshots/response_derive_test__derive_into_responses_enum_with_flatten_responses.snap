@@ -1,0 +1,26 @@
+---
+source: utoipa-gen/tests/response_derive_test.rs
+expression: responses
+---
+{
+  "403": {
+    "content": {
+      "text/plain": {
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "description": ""
+  },
+  "500": {
+    "content": {
+      "text/plain": {
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "description": ""
+  }
+}
