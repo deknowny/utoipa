@@ -1564,6 +1564,36 @@ pub mod __dev {
             )>,
         );
     }
+
+    impl<T, E> utoipa::__dev::SchemaReferences for ::core::result::Result<T, E>
+    where
+        T: utoipa::ToSchema,
+        E: utoipa::ToSchema,
+    {
+        fn schemas(
+            schemas: &mut Vec<(
+                String,
+                utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
+            )>,
+        ) {
+            <T as utoipa::ToSchema>::schemas(schemas);
+            <E as utoipa::ToSchema>::schemas(schemas);
+        }
+    }
+
+    impl<T> utoipa::__dev::SchemaReferences for ::core::option::Option<T>
+    where
+        T: utoipa::ToSchema,
+    {
+        fn schemas(
+            schemas: &mut Vec<(
+                String,
+                utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
+            )>,
+        ) {
+            <T as utoipa::ToSchema>::schemas(schemas);
+        }
+    }
 }
 
 #[cfg(test)]
