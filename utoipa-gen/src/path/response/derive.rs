@@ -583,15 +583,18 @@ trait Response {
     }
 
     fn has_no_field_attributes(attribute: &Attribute) -> (bool, &'static str) {
-        const ERROR: &str =
-            "Unexpected field attribute, field attributes are only supported at unnamed fields";
+        const ERROR: &str = "Unexpected field attribute";
 
         let ident = attribute.path().get_ident().unwrap();
         match &*ident.to_string() {
-            "to_schema" => (false, ERROR),
-            "ref_response" => (false, ERROR),
-            "content" => (false, ERROR),
-            "to_response" => (false, ERROR),
+            // `#[to_schema]` is allowed also on named fields (struct named fields / named enum variant fields)
+            // to request inlining of that field's schema.
+            "to_schema" => (true, ERROR),
+
+            // The following response-specific field attributes are still only supported on unnamed fields.
+            "ref_response" => (false, "Unexpected field attribute, field attributes are only supported at unnamed fields"),
+            "content" => (false, "Unexpected field attribute, field attributes are only supported at unnamed fields"),
+            "to_response" => (false, "Unexpected field attribute, field attributes are only supported at unnamed fields"),
             _ => (true, ERROR),
         }
     }
