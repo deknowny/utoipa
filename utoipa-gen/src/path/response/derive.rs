@@ -448,6 +448,89 @@ impl ToTokensDiagnostics for IntoResponses {
             });
         }
 
+        // --- SchemaReferences codegen (collect referenced schemas for OpenApi components) ---
+        fn field_has_to_schema(attrs: &[Attribute]) -> bool {
+            attrs.iter().any(|a| a.path().is_ident("to_schema"))
+        }
+
+        // Collect types which must be added to components/schemas.
+        let mut schema_ref_tys: Vec<&Type> = Vec::new();
+
+        match &self.data {
+            Data::Struct(struct_value) => match &struct_value.fields {
+                Fields::Named(fields) => {
+                    for field in fields.named.iter() {
+                        if field_has_to_schema(&field.attrs) {
+                            schema_ref_tys.push(&field.ty);
+                        }
+                    }
+                }
+                Fields::Unnamed(fields) => {
+                    if let Some(field) = fields.unnamed.first() {
+                        if field_has_to_schema(&field.attrs) {
+                            schema_ref_tys.push(&field.ty);
+                        }
+                    }
+                }
+                Fields::Unit => {}
+            },
+            Data::Enum(enum_value) => {
+                // Include schema refs from flatten variants and from fields explicitly annotated with #[to_schema].
+                for variant in enum_value.variants.iter() {
+                    let is_flatten = response_has_flatten(&variant.attrs)?;
+                    if is_flatten {
+                        if let Fields::Unnamed(fields) = &variant.fields {
+                            if let Some(field) = fields.unnamed.first() {
+                                schema_ref_tys.push(&field.ty);
+                            }
+                        }
+                        continue;
+                    }
+
+                    match &variant.fields {
+                        Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+                            let field = fields.unnamed.first().unwrap();
+                            if field_has_to_schema(&field.attrs) {
+                                schema_ref_tys.push(&field.ty);
+                            }
+                        }
+                        Fields::Named(fields) => {
+                            for field in fields.named.iter() {
+                                if field_has_to_schema(&field.attrs) {
+                                    schema_ref_tys.push(&field.ty);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Data::Union(_) => {}
+        }
+
+        if !schema_ref_tys.is_empty() {
+            let schema_refs = schema_ref_tys.into_iter().map(|ty| {
+                quote! {
+                    <#ty as utoipa::ToSchema>::schemas(schemas);
+                }
+            });
+
+            tokens.extend(quote! {
+                impl #impl_generics utoipa::__dev::SchemaReferences for #ident #ty_generics #where_clause {
+                    fn schemas(
+                        schemas: &mut Vec<
+                            (
+                                String,
+                                utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
+                            ),
+                        >,
+                    ) {
+                        #(#schema_refs)*
+                    }
+                }
+            });
+        }
+        // --- end SchemaReferences codegen ---
         // --- axum_extras IntoResponse codegen ---
         if to_axum {
             let axum_impl = match &self.data {

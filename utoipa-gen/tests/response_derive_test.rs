@@ -338,7 +338,7 @@ fn derive_into_responses_enum_with_multiple_responses() {
 
 #[test]
 fn derive_into_responses_enum_with_flatten_responses() {
-    #[derive(utoipa::IntoResponses)]
+    #[derive(utoipa::IntoResponses, utoipa::ToSchema)]
     #[allow(unused)]
     enum AuthLayerError {
         #[response(status = 403)]
@@ -363,7 +363,7 @@ fn derive_into_responses_enum_with_flatten_responses() {
 
 #[test]
 fn derive_into_responses_enum_with_flatten_overrides_conflicting_status() {
-    #[derive(utoipa::IntoResponses)]
+    #[derive(utoipa::IntoResponses, utoipa::ToSchema)]
     #[allow(unused)]
     enum AuthLayerError {
         #[response(status = 500)]
