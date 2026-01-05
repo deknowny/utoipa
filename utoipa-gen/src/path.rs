@@ -514,6 +514,47 @@ impl<'p> ToTokensDiagnostics for Path<'p> {
             .flatten()
             .fold(TokenStream2::new(), to_schema_references);
 
+        fn to_schema_calls_from_into_responses(ty: &syn::TypePath) -> TokenStream2 {
+            use syn::{GenericArgument, PathArguments};
+
+            let last = match ty.path.segments.last() {
+                Some(seg) => seg,
+                None => return TokenStream2::new(),
+            };
+
+            if last.ident == "Result" {
+                if let PathArguments::AngleBracketed(args) = &last.arguments {
+                    let mut type_args = args.args.iter().filter_map(|arg| match arg {
+                        GenericArgument::Type(t) => Some(t),
+                        _ => None,
+                    });
+                    if let (Some(ok), Some(err)) = (type_args.next(), type_args.next()) {
+                        return quote! {
+                            <#ok as utoipa::ToSchema>::schemas(schemas);
+                            <#err as utoipa::ToSchema>::schemas(schemas);
+                        };
+                    }
+                }
+            }
+
+            quote! {
+                <#ty as utoipa::ToSchema>::schemas(schemas);
+            }
+        }
+
+        let into_responses_schemas = self
+            .path_attr
+            .responses
+            .iter()
+            .filter_map(|response| match response {
+                Response::IntoResponses(ty) => Some(ty.as_ref()),
+                _ => None,
+            })
+            .fold(TokenStream2::new(), |mut ts, ty| {
+                ts.extend(to_schema_calls_from_into_responses(ty));
+                ts
+            });
+
         let schemas = self
             .path_attr
             .request_body
@@ -611,6 +652,7 @@ impl<'p> ToTokensDiagnostics for Path<'p> {
                 fn schemas(schemas: &mut Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>)>) {
                     #schemas
                     #response_schemas
+                    #into_responses_schemas
                 }
             }
 
