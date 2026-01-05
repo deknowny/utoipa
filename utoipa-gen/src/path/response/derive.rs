@@ -463,7 +463,6 @@ impl ToTokensDiagnostics for IntoResponses {
                     // Determine how to serialize body for struct: Json(self)
                     let status_u16 = status;
                     quote! {
-                        #[cfg(feature = "axum_extras")]
                         impl #impl_generics axum::response::IntoResponse for #ident #ty_generics #where_clause
                         where
                             #ident #ty_generics: serde::Serialize,
@@ -541,7 +540,6 @@ impl ToTokensDiagnostics for IntoResponses {
                     }
 
                     quote! {
-                        #[cfg(feature = "axum_extras")]
                         impl #impl_generics axum::response::IntoResponse for #ident #ty_generics #where_clause
                         where
                             #ident #ty_generics: serde::Serialize,
