@@ -559,7 +559,18 @@ impl ToTokensDiagnostics for IntoResponses {
                 }
             };
 
-            tokens.extend(axum_impl);
+            #[cfg(feature = "axum_extras")]
+            {
+                tokens.extend(axum_impl);
+            }
+        
+            #[cfg(not(feature = "axum_extras"))]
+            {
+                return Err(Diagnostics::with_span(
+                    self.ident.span(),
+                    "`#[utoipa(to_axum)]` requires enabling `utoipa` feature `axum_extras`",
+                ));
+            }
         }
 
         Ok(())
